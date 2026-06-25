@@ -229,17 +229,18 @@ class NotificationService {
       android: _buildAndroidDetails(tpl, resolvedBody),
     );
 
-    // exactAllowWhileIdle: fires even in Doze mode (requires SCHEDULE_EXACT_ALARM).
-    await _plugin.zonedSchedule(
+    // Pick the schedule mode based on whether exact alarms are actually allowed.
+    // If not (e.g. Samsung "Alarmas y recordatorios" off), fall back to inexact
+    // so scheduling NEVER fails silently — the notification still fires, just
+    // possibly with some delay. This is the key fix for "Programar no hace nada".
+    final exactAllowed = await canScheduleExactAlarms();
+    await _scheduleWithFallback(
       id,
       resolvedTitle,
       resolvedBody,
       tzTime,
       details,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      // Required by flutter_local_notifications iOS path even when targeting Android.
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
+      preferExact: exactAllowed,
     );
 
     final sn = ScheduledNotification(
@@ -252,6 +253,47 @@ class NotificationService {
     );
     _persist(sn);
     return sn;
+  }
+
+  /// Schedules with exact mode if allowed, falling back to inexact on either a
+  /// permission denial or a runtime PlatformException. Guarantees the alarm is
+  /// registered one way or another (never a silent no-op).
+  static Future<void> _scheduleWithFallback(
+    int id,
+    String title,
+    String body,
+    tz.TZDateTime when,
+    NotificationDetails details, {
+    required bool preferExact,
+  }) async {
+    final mode = preferExact
+        ? AndroidScheduleMode.exactAllowWhileIdle
+        : AndroidScheduleMode.inexactAllowWhileIdle;
+    try {
+      await _plugin.zonedSchedule(
+        id,
+        title,
+        body,
+        when,
+        details,
+        androidScheduleMode: mode,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+    } on PlatformException catch (_) {
+      // Exact alarm rejected at runtime by the OS — retry inexact so we still
+      // schedule something rather than throwing back to the UI.
+      await _plugin.zonedSchedule(
+        id,
+        title,
+        body,
+        when,
+        details,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+    }
   }
 
   // ── Cold-delivery self-test ───────────────────────────────────────────────
@@ -275,15 +317,13 @@ class NotificationService {
       ),
     );
 
-    await _plugin.zonedSchedule(
+    await _scheduleWithFallback(
       id,
       '✅ Prueba en frío',
       'Si ves esto con la app CERRADA, la entrega en frío funciona.',
       tzTime,
       details,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
+      preferExact: await canScheduleExactAlarms(),
     );
 
     final sn = ScheduledNotification(
@@ -421,15 +461,13 @@ class NotificationService {
       final details = NotificationDetails(
         android: _buildAndroidDetails(tpl, sn.resolvedBody),
       );
-      await _plugin.zonedSchedule(
+      await _scheduleWithFallback(
         sn.notifId,
         sn.resolvedTitle,
         sn.resolvedBody,
         tzTime,
         details,
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
+        preferExact: await canScheduleExactAlarms(),
       );
     }
   }

@@ -170,17 +170,15 @@ class _HomeScreenState extends State<HomeScreen> {
         await NotificationService.showImmediate(tpl, _variables);
         _snack('Notificación generada ahora');
       case ScheduleMode.scheduled:
-        if (!_exactAlarmEnabled) {
-          _snack('Activa permiso de alarma exacta primero');
-          return;
-        }
+        // No early-return: if exact alarm is off (typical on Samsung), confirm
+        // with the user instead of failing silently.
+        if (!_exactAlarmEnabled && !await _confirmInexactSchedule()) return;
         await NotificationService.scheduleAt(tpl, _variables, result.time!);
-        _snack('Programada para ${_fmt(result.time!)}');
+        _snack(_exactAlarmEnabled
+            ? 'Programada (exacta) para ${_fmt(result.time!)}'
+            : 'Programada (inexacta, puede retrasarse) para ${_fmt(result.time!)}');
       case ScheduleMode.random:
-        if (!_exactAlarmEnabled) {
-          _snack('Activa permiso de alarma exacta primero');
-          return;
-        }
+        if (!_exactAlarmEnabled && !await _confirmInexactSchedule()) return;
         final list = await NotificationService.scheduleRandom(
           tpl: tpl,
           variables: _variables,
@@ -188,9 +186,51 @@ class _HomeScreenState extends State<HomeScreen> {
           windowEnd: result.windowEnd!,
           count: result.count!,
         );
-        _snack('${list.length} notificaciones aleatorias programadas');
+        _snack('${list.length} notificaciones programadas'
+            '${_exactAlarmEnabled ? '' : ' (inexactas, pueden retrasarse)'}');
     }
     _load();
+  }
+
+  /// Shown when scheduling without the exact-alarm permission (common on Samsung
+  /// One UI, where "Alarmas y recordatorios" is a separate special access).
+  /// Offers to open the settings screen or proceed with inexact scheduling.
+  Future<bool> _confirmInexactSchedule() async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Falta permiso de alarma exacta'),
+        content: const Text(
+          'El permiso "Alarmas y recordatorios" está desactivado. En Samsung es '
+          'un permiso SEPARADO de notificaciones y batería, fácil de pasar por '
+          'alto.\n\n'
+          'Sin él, Android sólo permite alarmas INEXACTAS: la notificación '
+          'llegará, pero puede retrasarse varios minutos.\n\n'
+          '¿Qué quieres hacer?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'settings'),
+            child: const Text('Abrir ajustes'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, 'inexact'),
+            child: const Text('Programar igual'),
+          ),
+        ],
+      ),
+    );
+    if (choice == 'settings') {
+      await NotificationService.requestExactAlarmPermission();
+      await _checkPermissions();
+      // Don't schedule now; let the user retry after granting.
+      return false;
+    }
+    return choice == 'inexact';
   }
 
   // ── Variable actions ──────────────────────────────────────────────────────
